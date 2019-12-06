@@ -53,7 +53,7 @@ sub RunXMRStak{
     my $poolconfig = shift;
     
     #run xmr-stak in parallel
-    system("./xmr-stak -c $configfile  -C $poolconfig &");
+    system("./xmr-stak-rx -c $configfile  -C $poolconfig &");
 
     #wait for some time
     sleep ($runtime);
