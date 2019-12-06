@@ -21,33 +21,34 @@
   *
   */
 
-#include "xmrstak/jconf.hpp"
 #include "executor.hpp"
+#include "xmrstak/jconf.hpp"
 #include "xmrstak/net/jpsock.hpp"
+#include "xmrstak/net/socket.hpp"
 
 #include "telemetry.hpp"
-#include "xmrstak/backend/miner_work.hpp"
-#include "xmrstak/backend/globalStates.hpp"
 #include "xmrstak/backend/backendConnector.hpp"
+#include "xmrstak/backend/globalStates.hpp"
 #include "xmrstak/backend/iBackend.hpp"
+#include "xmrstak/backend/miner_work.hpp"
 
+#include "xmrstak/http/webdesign.hpp"
 #include "xmrstak/jconf.hpp"
 #include "xmrstak/misc/console.hpp"
-#include "xmrstak/donate-level.hpp"
+#include "xmrstak/misc/motd.hpp"
 #include "xmrstak/version.hpp"
-#include "xmrstak/http/webdesign.hpp"
 
-#include <thread>
-#include <string>
-#include <cmath>
 #include <algorithm>
-#include <functional>
 #include <assert.h>
+#include <cmath>
+#include <functional>
+#include <string>
+#include <thread>
 #include <time.h>
-
 
 #ifdef _WIN32
 #define strncasecmp _strnicmp
+#include <windows.h>
 #endif // _WIN32
 
 executor::executor()
@@ -63,7 +64,7 @@ void executor::push_timed_event(ex_event&& ev, size_t sec)
 void executor::ex_clock_thd()
 {
 	size_t tick = 0;
-	while (true)
+	while(true)
 	{
 		std::this_thread::sleep_for(std::chrono::milliseconds(size_t(iTickTime)));
 
@@ -76,7 +77,7 @@ void executor::ex_clock_thd()
 		// Service timed events
 		std::unique_lock<std::mutex> lck(timed_event_mutex);
 		std::list<timed_event>::iterator ev = lTimedEvents.begin();
-		while (ev != lTimedEvents.end())
+		while(ev != lTimedEvents.end())
 		{
 			ev->ticks_left--;
 			if(ev->ticks_left == 0)
@@ -91,24 +92,22 @@ void executor::ex_clock_thd()
 	}
 }
 
-bool executor::get_live_pools(std::vector<jpsock*>& eval_pools, bool is_dev)
+bool executor::get_live_pools(std::vector<jpsock*>& eval_pools)
 {
 	size_t limit = jconf::inst()->GetGiveUpLimit();
 	size_t wait = jconf::inst()->GetNetRetry();
 
-	if(limit == 0 || is_dev) limit = (-1); //No limit = limit of 2^64-1
+	if(limit == 0)
+		limit = (-1); //No limit = limit of 2^64-1
 
 	size_t pool_count = 0;
 	size_t over_limit = 0;
 	for(jpsock& pool : pools)
 	{
-		if(pool.is_dev_pool() != is_dev)
-			continue;
 
 		// Only eval live pools
 		size_t num, dtime;
-		/*if(*/pool.get_disconnects(num, dtime)/*)
-			set_timestamp()*/;
+		pool.update_disconnects(num, dtime);
 
 		if(dtime == 0 || (dtime >= wait && num <= limit))
 			eval_pools.emplace_back(&pool);
@@ -120,25 +119,20 @@ bool executor::get_live_pools(std::vector<jpsock*>& eval_pools, bool is_dev)
 
 	if(eval_pools.size() == 0)
 	{
-		if(!is_dev)
+		if(xmrstak::globalStates::inst().pool_id != invalid_pool_id)
 		{
-			if(xmrstak::globalStates::inst().pool_id != invalid_pool_id)
-			{
-				printer::inst()->print_msg(L0, "All pools are dead. Idling...");
-				xmrstak::pool_data dat;
-				xmrstak::globalStates::inst().switch_work(xmrstak::miner_work(), dat);
-			}
-
-			if(over_limit == pool_count)
-			{
-				printer::inst()->print_msg(L0, "All pools are over give up limit. Exiting.");
-				exit(0);
-			}
-
-			return false;
+			printer::inst()->print_msg(L0, "All pools are dead. Idling...");
+			xmrstak::pool_data dat;
+			xmrstak::globalStates::inst().switch_work(xmrstak::miner_work(), dat);
 		}
-		else
-			return get_live_pools(eval_pools, false);
+
+		if(over_limit == pool_count)
+		{
+			printer::inst()->print_msg(L0, "All pools are over give up limit. Exiting.");
+			exit(0);
+		}
+
+		return false;
 	}
 
 	return true;
@@ -153,8 +147,7 @@ void executor::eval_pool_choice()
 	std::vector<jpsock*> eval_pools;
 	eval_pools.reserve(pools.size());
 
-	bool dev_time = is_dev_time();
-	if(!get_live_pools(eval_pools, dev_time))
+	if(!get_live_pools(eval_pools))
 		return;
 
 	size_t running = 0;
@@ -167,15 +160,12 @@ void executor::eval_pool_choice()
 	// Special case - if we are without a pool, connect to all find a live pool asap
 	if(running == 0)
 	{
-		if(dev_time)
-			printer::inst()->print_msg(L1, "Fast-connecting to dev pool ...");
-
 		for(jpsock* pool : eval_pools)
 		{
 			if(pool->can_connect())
 			{
-				if(!dev_time)
-					printer::inst()->print_msg(L1, "Fast-connecting to %s pool ...", pool->get_pool_addr());
+
+				printer::inst()->print_msg(L1, "Fast-connecting to %s pool ...", pool->get_pool_addr());
 				std::string error;
 				if(!pool->connect(error))
 					log_socket_error(pool, std::move(error));
@@ -192,10 +182,7 @@ void executor::eval_pool_choice()
 	{
 		if(!goal->is_running() && goal->can_connect())
 		{
-			if(dev_time)
-				printer::inst()->print_msg(L1, "Connecting to dev pool ...");
-			else
-				printer::inst()->print_msg(L1, "Connecting to %s pool ...", goal->get_pool_addr());
+			printer::inst()->print_msg(L1, "Connecting to %s pool ...", goal->get_pool_addr());
 
 			std::string error;
 			if(!goal->connect(error))
@@ -217,13 +204,8 @@ void executor::eval_pool_choice()
 			on_pool_have_job(current_pool_id, oPoolJob);
 
 			jpsock* prev_pool = pick_pool_by_id(prev_pool_id);
-			if(prev_pool == nullptr || (!prev_pool->is_dev_pool() && !goal->is_dev_pool()))
+			if(prev_pool == nullptr)
 				reset_stats();
-
-			if(goal->is_dev_pool() && (prev_pool != nullptr && !prev_pool->is_dev_pool()))
-				last_usr_pool_id = prev_pool_id;
-			else
-				last_usr_pool_id = invalid_pool_id;
 
 			return;
 		}
@@ -247,16 +229,11 @@ void executor::eval_pool_choice()
 		}
 	}
 
-	if(!dev_time)
-	{
-		for(jpsock& pool : pools)
-		{
-			if(goal->is_logged_in() && pool.is_logged_in() && pool.get_pool_id() != goal->get_pool_id())
-				pool.disconnect(true);
 
-			if(pool.is_dev_pool() && pool.is_logged_in())
-				pool.disconnect(true);
-		}
+	for(jpsock& pool : pools)
+	{
+		if(goal->is_logged_in() && pool.is_logged_in() && pool.get_pool_id() != goal->get_pool_id())
+			pool.disconnect(true);
 	}
 }
 
@@ -321,16 +298,13 @@ void executor::on_sock_ready(size_t pool_id)
 {
 	jpsock* pool = pick_pool_by_id(pool_id);
 
-	if(pool->is_dev_pool())
-		printer::inst()->print_msg(L1, "Dev pool connected. Logging in...");
-	else
-		printer::inst()->print_msg(L1, "Pool %s connected. Logging in...", pool->get_pool_addr());
+	printer::inst()->print_msg(L1, "Pool %s connected. Logging in...", pool->get_pool_addr());
 
 	if(!pool->cmd_login())
 	{
-		if(pool->have_call_error() && !pool->is_dev_pool())
+		if(pool->have_call_error())
 		{
-			std::string str = "Login error: " +  pool->get_call_error();
+			std::string str = "Login error: " + pool->get_call_error();
 			log_socket_error(pool, std::move(str));
 		}
 
@@ -351,10 +325,7 @@ void executor::on_sock_error(size_t pool_id, std::string&& sError, bool silent)
 	if(silent)
 		return;
 
-	if(!pool->is_dev_pool())
-		log_socket_error(pool, std::move(sError));
-	else
-		printer::inst()->print_msg(L1, "Dev pool socket error - mining on user pool...");
+	log_socket_error(pool, std::move(sError));
 }
 
 void executor::on_pool_have_job(size_t pool_id, pool_job& oPoolJob)
@@ -368,8 +339,10 @@ void executor::on_pool_have_job(size_t pool_id, pool_job& oPoolJob)
 	dat.iSavedNonce = oPoolJob.iSavedNonce;
 	dat.pool_id = pool_id;
 
-	xmrstak::globalStates::inst().switch_work(xmrstak::miner_work(oPoolJob.sJobID, oPoolJob.bWorkBlob,
-		oPoolJob.iWorkLen, oPoolJob.iTarget, pool->is_nicehash(), pool_id, oPoolJob.iBlockHeight), dat);
+	xmrstak::globalStates::inst().switch_work(
+		xmrstak::miner_work(oPoolJob.sJobID, oPoolJob.bWorkBlob,
+			oPoolJob.iWorkLen, oPoolJob.iTarget, pool->is_nicehash(), pool_id, oPoolJob.iBlockHeight,oPoolJob.seed_hash),
+		dat);
 
 	if(dat.pool_id != pool_id)
 	{
@@ -377,9 +350,6 @@ void executor::on_pool_have_job(size_t pool_id, pool_job& oPoolJob)
 		if((prev_pool = pick_pool_by_id(dat.pool_id)) != nullptr)
 			prev_pool->save_nonce(dat.iSavedNonce);
 	}
-
-	if(pool->is_dev_pool())
-		return;
 
 	if(iPoolDiff != pool->get_current_diff())
 	{
@@ -392,10 +362,7 @@ void executor::on_pool_have_job(size_t pool_id, pool_job& oPoolJob)
 		jpsock* prev_pool;
 		if(dat.pool_id != invalid_pool_id && (prev_pool = pick_pool_by_id(dat.pool_id)) != nullptr)
 		{
-			if(prev_pool->is_dev_pool())
-				printer::inst()->print_msg(L2, "Switching back to user pool.");
-			else
-				printer::inst()->print_msg(L2, "Pool switched.");
+			printer::inst()->print_msg(L2, "Pool switched.");
 		}
 		else
 			printer::inst()->print_msg(L2, "Pool logged in.");
@@ -415,17 +382,7 @@ void executor::on_miner_result(size_t pool_id, job_result& oResult)
 	for(size_t i = 0; i < pvThreads->size(); i++)
 		total_hashcount += pvThreads->at(i)->iHashCount.load(std::memory_order_relaxed);
 
-	if(pool->is_dev_pool())
-	{
-		//Ignore errors silently
-		if(pool->is_running() && pool->is_logged_in())
-			pool->cmd_submit(oResult.sJobID, oResult.iNonce, oResult.bResult, backend_name,
-			backend_hashcount, total_hashcount, oResult.algorithm
-		);
-		return;
-	}
-
-	if (!pool->is_running() || !pool->is_logged_in())
+	if(!pool->is_running() || !pool->is_logged_in())
 	{
 		log_result_error("[NETWORK ERROR]");
 		return;
@@ -433,25 +390,42 @@ void executor::on_miner_result(size_t pool_id, job_result& oResult)
 
 	size_t t_start = get_timestamp_ms();
 	bool bResult = pool->cmd_submit(oResult.sJobID, oResult.iNonce, oResult.bResult,
-		backend_name, backend_hashcount, total_hashcount, oResult.algorithm
-	);
+		backend_name, backend_hashcount, total_hashcount, oResult.algorithm);
 	size_t t_len = get_timestamp_ms() - t_start;
 
 	if(t_len > 0xFFFF)
 		t_len = 0xFFFF;
 	iPoolCallTimes.push_back((uint16_t)t_len);
 
+	std::string name(backend_name);
+	std::transform(name.begin(), name.end(), name.begin(), ::toupper);
+
 	if(bResult)
 	{
 		uint64_t* targets = (uint64_t*)oResult.bResult;
 		log_result_ok(t64_to_diff(targets[3]));
-		printer::inst()->print_msg(L3, "Result accepted by the pool.");
+
+		if (pvThreads->at(oResult.iThreadId)->backendType == xmrstak::iBackend::BackendType::CPU)
+		{
+			printer::inst()->print_msg(L3, "CPU: Share accepted. Pool: %s", pool->get_pool_addr());
+		}
+		else
+		{
+			printer::inst()->print_msg(L3, "%s GPU %u: Share accepted. Pool: %s", name.c_str(), pvThreads->at(oResult.iThreadId)->iGpuIndex, pool->get_pool_addr());
+		}
 	}
 	else
 	{
 		if(!pool->have_sock_error())
 		{
-			printer::inst()->print_msg(L3, "Result rejected by the pool.");
+			if (pvThreads->at(oResult.iThreadId)->backendType == xmrstak::iBackend::BackendType::CPU)
+			{
+				printer::inst()->print_msg(L3, "CPU: Share rejected. Pool: %s", pool->get_pool_addr());
+			}
+			else
+			{
+				printer::inst()->print_msg(L3, "%s GPU %u: Share rejected. Pool: %s", name.c_str(), pvThreads->at(oResult.iThreadId)->iGpuIndex, pool->get_pool_addr());
+			}
 
 			std::string error = pool->get_call_error();
 
@@ -477,13 +451,36 @@ void disable_sigpipe()
 	memset(&sa, 0, sizeof(sa));
 	sa.sa_handler = SIG_IGN;
 	sa.sa_flags = 0;
-	if (sigaction(SIGPIPE, &sa, 0) == -1)
+	if(sigaction(SIGPIPE, &sa, 0) == -1)
 		printer::inst()->print_msg(L1, "ERROR: Call to sigaction failed!");
 }
 
 #else
-inline void disable_sigpipe() {}
+inline void disable_sigpipe()
+{
+}
 #endif
+
+
+void open_motd_link()
+{
+	std::string motd_url = xmrstak::motd::inst().get_url();
+	if(!motd_url.empty())
+	{
+#ifndef _WIN32
+		if(std::system("which xdg-open > /dev/null 2>&1") == 0)
+		{
+			auto ret = std::system((std::string("xdg-open  ") + motd_url + " > /dev/null 2>&1").c_str() );
+			if(ret == 0)
+				printer::inst()->print_msg(L1, (std::string("opening url '") + motd_url + "' with the default browser").c_str());
+			else
+				printer::inst()->print_msg(L1, (std::string("Failed to open url '") + motd_url + "'").c_str());
+		}
+#else
+		HINSTANCE r = ShellExecute(NULL, "open", motd_url.c_str(), NULL, NULL, SW_SHOWNORMAL);
+#endif
+	}
+}
 
 void executor::ex_main()
 {
@@ -496,7 +493,7 @@ void executor::ex_main()
 	// \todo collect all backend threads
 	pvThreads = xmrstak::BackendConnector::thread_starter(oWork);
 
-	if(pvThreads->size()==0)
+	if(pvThreads->size() == 0)
 	{
 		printer::inst()->print_msg(L1, "ERROR: No miner backend enabled.");
 		win_exit();
@@ -504,15 +501,13 @@ void executor::ex_main()
 
 	telem = new xmrstak::telemetry(pvThreads->size());
 
-	set_timestamp();
 	size_t pc = jconf::inst()->GetPoolCount();
-	bool dev_tls = true;
 	bool already_have_cli_pool = false;
-	size_t i=0;
+	size_t i = 0;
 	for(; i < pc; i++)
 	{
 		jconf::pool_cfg cfg;
- 		jconf::inst()->GetPoolConfig(i, cfg);
+		jconf::inst()->GetPoolConfig(i, cfg);
 #ifdef CONF_NO_TLS
 		if(cfg.tls)
 		{
@@ -520,7 +515,6 @@ void executor::ex_main()
 			win_exit();
 		}
 #endif
-		if(!cfg.tls) dev_tls = false;
 
 		if(!xmrstak::params::inst().poolURL.empty() && xmrstak::params::inst().poolURL == cfg.sPoolAddr)
 		{
@@ -532,10 +526,10 @@ void executor::ex_main()
 			const char* pwd = params.userSetPwd ? params.poolPasswd.c_str() : cfg.sPasswd;
 			bool nicehash = cfg.nicehash || params.nicehashMode;
 
-			pools.emplace_back(i+1, cfg.sPoolAddr, wallet, rigid, pwd, 9.9, false, params.poolUseTls, cfg.tls_fingerprint, nicehash);
+			pools.emplace_back(i, cfg.sPoolAddr, wallet, rigid, pwd, 9.9, params.poolUseTls, cfg.tls_fingerprint, nicehash);
 		}
 		else
-			pools.emplace_back(i+1, cfg.sPoolAddr, cfg.sWalletAddr, cfg.sRigId, cfg.sPasswd, cfg.weight, false, cfg.tls, cfg.tls_fingerprint, cfg.nicehash);
+			pools.emplace_back(i, cfg.sPoolAddr, cfg.sWalletAddr, cfg.sRigId, cfg.sPasswd, cfg.weight, cfg.tls, cfg.tls_fingerprint, cfg.nicehash);
 	}
 
 	if(!xmrstak::params::inst().poolURL.empty() && !already_have_cli_pool)
@@ -547,48 +541,9 @@ void executor::ex_main()
 			win_exit();
 		}
 
-		pools.emplace_back(i+1, params.poolURL.c_str(), params.poolUsername.c_str(), params.poolRigid.c_str(), params.poolPasswd.c_str(), 9.9, false, params.poolUseTls, "", params.nicehashMode);
+		pools.emplace_back(i, params.poolURL.c_str(), params.poolUsername.c_str(), params.poolRigid.c_str(), params.poolPasswd.c_str(), 9.9, params.poolUseTls, "", params.nicehashMode);
 	}
 
-	switch(jconf::inst()->GetCurrentCoinSelection().GetDescription(0).GetMiningAlgo())
-	{
-	case cryptonight_heavy:
-		if(dev_tls)
-			pools.emplace_front(0, "donate.xmr-stak.net:8888", "", "", "", 0.0, true, true, "", true);
-		else
-			pools.emplace_front(0, "pool.loki.hashvault.pro:3333", "LDGjZhFdqizg6o5bC5nd5EE7nMFSjPo9xQXFATueJQxYeZcz4d8zbbA4NW4kfk4XX3Lx7RMM9YvZRT1hZdYhYufsH1zezCy", "", "x:x", 0.0, true, false, "", false);
-		break;
-	case cryptonight_gpu:
-		if(dev_tls)
-			pools.emplace_front(0, "donate.xmr-stak.net:8811", "", "", "", 0.0, true, true, "", false);
-		else
-			pools.emplace_front(0, "donate.xmr-stak.net:5511", "", "", "", 0.0, true, false, "", false);
-		break;
-	case cryptonight_monero_v8:
-		if(dev_tls)
-			pools.emplace_front(0, "donate.xmr-stak.net:8800", "", "", "", 0.0, true, true, "", false);
-		else
-                        pools.emplace_front(0, "pool.supportxmr.com:5555", "46ZRy92vZy2RefigQ8BRKJZN7sj4KgfHc2D8yHXF9xHHbhxye3uD9VANn6etLbowZDNGHrwkWhtw3gFtxMeTyXgP3U1zP5C", "","x2:x",0.0, true, false, "", false); 
-		break;
-	case cryptonight_aeon:
-		if(dev_tls)
-			pools.emplace_front(0, "donate.xmr-stak.net:7777", "", "", "", 0.0, true, true, "", true);
-		else
-			pools.emplace_front(0, "donate.xmr-stak.net:4444", "", "", "", 0.0, true, false, "", true);
-		break;
-	case cryptonight_r:
-		if(dev_tls)
-			pools.emplace_front(0, "donate.xmr-stak.net:8822", "", "", "", 0.0, true, true, "", false);
-		else
-			pools.emplace_front(0, "donate.xmr-stak.net:5522", "", "", "", 0.0, true, false, "", false);
-		break;
-	default:
-		if(dev_tls)
-			pools.emplace_front(0, "donate.xmr-stak.net:6666", "", "", "", 0.0, true, true, "", true);
-		else
-			pools.emplace_front(0, "donate.xmr-stak.net:3333", "", "", "", 0.0, true, false, "", true);
-		break;
-	}
 
 	ex_event ev;
 	std::thread clock_thd(&executor::ex_clock_thd, this);
@@ -603,11 +558,13 @@ void executor::ex_main()
 	if(jconf::inst()->GetVerboseLevel() >= 4)
 		push_timed_event(ex_event(EV_HASHRATE_LOOP), jconf::inst()->GetAutohashTime());
 
+	push_timed_event(ex_event(EV_SOCK_UPDATE_MOTD), 1);
+
 	size_t cnt = 0;
-	while (true)
+	while(true)
 	{
 		ev = oEventQ.pop();
-		switch (ev.iName)
+		switch(ev.iName)
 		{
 		case EV_SOCK_READY:
 			on_sock_ready(ev.iPoolId);
@@ -638,9 +595,9 @@ void executor::ex_main()
 		}
 
 		case EV_PERF_TICK:
-			for (i = 0; i < pvThreads->size(); i++)
+			for(i = 0; i < pvThreads->size(); i++)
 				telem->push_perf_value(i, pvThreads->at(i)->iHashCount.load(std::memory_order_relaxed),
-				pvThreads->at(i)->iTimestamp.load(std::memory_order_relaxed));
+					pvThreads->at(i)->iTimestamp.load(std::memory_order_relaxed));
 
 			if((cnt++ & 0xF) == 0) //Every 16 ticks
 			{
@@ -648,7 +605,7 @@ void executor::ex_main()
 				double fTelem;
 				bool normal = true;
 
-				for (i = 0; i < pvThreads->size(); i++)
+				for(i = 0; i < pvThreads->size(); i++)
 				{
 					fTelem = telem->calc_telemetry_data(10000, i);
 					if(std::isnormal(fTelem))
@@ -684,6 +641,13 @@ void executor::ex_main()
 			print_report(EV_USR_HASHRATE);
 			push_timed_event(ex_event(EV_HASHRATE_LOOP), jconf::inst()->GetAutohashTime());
 			break;
+		case EV_SOCK_UPDATE_MOTD:
+			update_motd(true);
+			push_timed_event(ex_event(EV_SOCK_UPDATE_MOTD), 60*60);
+			break;
+		case EV_MOTD_LINK:
+			open_motd_link();
+			break;
 
 		case EV_INVALID_VAL:
 		default:
@@ -709,7 +673,7 @@ bool executor::motd_filter_console(std::string& motd)
 	if(motd.size() > motd_max_length)
 		return false;
 
-	motd.erase(std::remove_if(motd.begin(), motd.end(), [](int chr)->bool { return !((chr >= 0x20 && chr <= 0x7e) || chr == '\n');}), motd.end());
+	motd.erase(std::remove_if(motd.begin(), motd.end(), [](int chr) -> bool { return !((chr >= 0x20 && chr <= 0x7e) || chr == '\n'); }), motd.end());
 	return motd.size() > 0;
 }
 
@@ -721,7 +685,7 @@ bool executor::motd_filter_web(std::string& motd)
 	std::string tmp;
 	tmp.reserve(motd.size() + 128);
 
-	for(size_t i=0; i < motd.size(); i++)
+	for(size_t i = 0; i < motd.size(); i++)
 	{
 		char c = motd[i];
 		switch(c)
@@ -773,18 +737,20 @@ void executor::hashrate_report(std::string& out)
 		}
 	}
 
-	char num[32];
-	double fTotal[3] = { 0.0, 0.0, 0.0};
+	std::string motd_server_str = xmrstak::motd::inst().get_message();
+	if(!motd_server_str.empty())
+		printer::inst()->print_coloured_str((char*)motd_server_str.c_str(), motd_server_str.size());
 
-	for( uint32_t b = 0; b < 4u; ++b)
+	char num[32];
+	double fTotal[3] = {0.0, 0.0, 0.0};
+
+	for(uint32_t b = 0; b < 4u; ++b)
 	{
 		std::vector<xmrstak::iBackend*> backEnds;
 		std::copy_if(pvThreads->begin(), pvThreads->end(), std::back_inserter(backEnds),
-			[&](xmrstak::iBackend* backend)
-			{
+			[&](xmrstak::iBackend* backend) {
 				return backend->backendType == b;
-			}
-		);
+			});
 
 		size_t nthd = backEnds.size();
 		if(nthd != 0)
@@ -801,8 +767,8 @@ void executor::hashrate_report(std::string& out)
 			else
 				out.append(1, '\n');
 
-			double fTotalCur[3] = { 0.0, 0.0, 0.0};
-			for (i = 0; i < nthd; i++)
+			double fTotalCur[3] = {0.0, 0.0, 0.0};
+			for(i = 0; i < nthd; i++)
 			{
 				double fHps[3];
 
@@ -883,12 +849,11 @@ void executor::result_report(std::string& out)
 	size_t iGoodRes = vMineResults[0].count, iTotalRes = iGoodRes;
 	size_t ln = vMineResults.size();
 
-	for(size_t i=1; i < ln; i++)
+	for(size_t i = 1; i < ln; i++)
 		iTotalRes += vMineResults[i].count;
 
 	out.append("RESULT REPORT\n");
-	out.append("Currency         : ").
-		append(jconf::inst()->GetMiningCoin()).append("\n");
+	out.append("Currency         : ").append(jconf::inst()->GetMiningCoin()).append("\n");
 	if(iTotalRes == 0)
 	{
 		out.append("You haven't found any results yet.\n");
@@ -904,8 +869,7 @@ void executor::result_report(std::string& out)
 	snprintf(num, sizeof(num), " (%.1f %%)\n", 100.0 * iGoodRes / iTotalRes);
 
 	out.append("Difficulty       : ").append(std::to_string(iPoolDiff)).append(1, '\n');
-	out.append("Good results     : ").append(std::to_string(iGoodRes)).append(" / ").
-		append(std::to_string(iTotalRes)).append(num);
+	out.append("Good results     : ").append(std::to_string(iGoodRes)).append(" / ").append(std::to_string(iTotalRes)).append(num);
 
 	if(iPoolCallTimes.size() != 0)
 	{
@@ -916,10 +880,10 @@ void executor::result_report(std::string& out)
 	out.append("Pool-side hashes : ").append(std::to_string(iPoolHashes)).append(2, '\n');
 	out.append("Top 10 best results found:\n");
 
-	for(size_t i=0; i < 10; i += 2)
+	for(size_t i = 0; i < 10; i += 2)
 	{
 		snprintf(num, sizeof(num), "| %2llu | %16llu | %2llu | %16llu |\n",
-			int_port(i), int_port(iTopDiff[i]), int_port(i+1), int_port(iTopDiff[i+1]));
+			int_port(i), int_port(iTopDiff[i]), int_port(i + 1), int_port(iTopDiff[i + 1]));
 		out.append(num);
 	}
 
@@ -927,7 +891,7 @@ void executor::result_report(std::string& out)
 	if(ln > 1)
 	{
 		out.append("| Count | Error text                       | Last seen           |\n");
-		for(size_t i=1; i < ln; i++)
+		for(size_t i = 1; i < ln; i++)
 		{
 			snprintf(num, sizeof(num), "| %5llu | %-32.32s | %s |\n", int_port(vMineResults[i].count),
 				vMineResults[i].msg.c_str(), time_format(date, sizeof(date), vMineResults[i].time));
@@ -946,8 +910,6 @@ void executor::connection_report(std::string& out)
 	out.reserve(512);
 
 	jpsock* pool = pick_pool_by_id(current_pool_id);
-	if(pool != nullptr && pool->is_dev_pool())
-		pool = pick_pool_by_id(last_usr_pool_id);
 
 	out.append("CONNECTION REPORT\n");
 	out.append("Rig ID          : ").append(pool != nullptr ? pool->get_rigid() : "").append(1, '\n');
@@ -958,11 +920,11 @@ void executor::connection_report(std::string& out)
 		out.append("Connected since : <not connected>\n");
 
 	size_t n_calls = iPoolCallTimes.size();
-	if (n_calls > 1)
+	if(n_calls > 1)
 	{
 		//Not-really-but-good-enough median
-		std::nth_element(iPoolCallTimes.begin(), iPoolCallTimes.begin() + n_calls/2, iPoolCallTimes.end());
-		out.append("Pool ping time  : ").append(std::to_string(iPoolCallTimes[n_calls/2])).append(" ms\n");
+		std::nth_element(iPoolCallTimes.begin(), iPoolCallTimes.begin() + n_calls / 2, iPoolCallTimes.end());
+		out.append("Pool ping time  : ").append(std::to_string(iPoolCallTimes[n_calls / 2])).append(" ms\n");
 	}
 	else
 		out.append("Pool ping time  : (n/a)\n");
@@ -972,7 +934,7 @@ void executor::connection_report(std::string& out)
 	if(ln > 0)
 	{
 		out.append("| Date                | Error text                                             |\n");
-		for(size_t i=0; i < ln; i++)
+		for(size_t i = 0; i < ln; i++)
 		{
 			snprintf(num, sizeof(num), "| %s | %-54.54s |\n",
 				time_format(date, sizeof(date), vSocketLog[i].time), vSocketLog[i].msg.c_str());
@@ -1045,11 +1007,11 @@ void executor::http_hashrate_report(std::string& out)
 	snprintf(buffer, sizeof(buffer), sHtmlHashrateBodyHigh, (unsigned int)nthd + 3);
 	out.append(buffer);
 
-	double fTotal[3] = { 0.0, 0.0, 0.0};
+	double fTotal[3] = {0.0, 0.0, 0.0};
 	auto bTypePrev = static_cast<xmrstak::iBackend::BackendType>(0);
 	std::string name;
 	size_t j = 0;
-	for(size_t i=0; i < nthd; i++)
+	for(size_t i = 0; i < nthd; i++)
 	{
 		double fHps[3];
 		char csThreadTag[25];
@@ -1065,14 +1027,13 @@ void executor::http_hashrate_report(std::string& out)
 		}
 		snprintf(csThreadTag, sizeof(csThreadTag),
 			(99 < nthd) ? "[%s.%03u]:%03u" : ((9 < nthd) ? "[%s.%02u]:%02u" : "[%s.%u]:%u"),
-			name.c_str(), (unsigned int)(j), (unsigned int)i
-		);
+			name.c_str(), (unsigned int)(j), (unsigned int)i);
 
 		fHps[0] = telem->calc_telemetry_data(10000, i);
 		fHps[1] = telem->calc_telemetry_data(60000, i);
 		fHps[2] = telem->calc_telemetry_data(900000, i);
 
-		num_a[0] = num_b[0] = num_c[0] ='\0';
+		num_a[0] = num_b[0] = num_c[0] = '\0';
 		hps_format(fHps[0], num_a, sizeof(num_a));
 		hps_format(fHps[1], num_b, sizeof(num_b));
 		hps_format(fHps[2], num_c, sizeof(num_c));
@@ -1085,7 +1046,7 @@ void executor::http_hashrate_report(std::string& out)
 		out.append(buffer);
 	}
 
-	num_a[0] = num_b[0] = num_c[0] = num_d[0] ='\0';
+	num_a[0] = num_b[0] = num_c[0] = num_d[0] = '\0';
 	hps_format(fTotal[0], num_a, sizeof(num_a));
 	hps_format(fTotal[1], num_b, sizeof(num_b));
 	hps_format(fTotal[2], num_c, sizeof(num_c));
@@ -1102,13 +1063,13 @@ void executor::http_result_report(std::string& out)
 
 	out.reserve(4096);
 
-	snprintf(buffer, sizeof(buffer), sHtmlCommonHeader, "Result Report", ver_html,  "Result Report");
+	snprintf(buffer, sizeof(buffer), sHtmlCommonHeader, "Result Report", ver_html, "Result Report");
 	out.append(buffer);
 
 	size_t iGoodRes = vMineResults[0].count, iTotalRes = iGoodRes;
 	size_t ln = vMineResults.size();
 
-	for(size_t i=1; i < ln; i++)
+	for(size_t i = 1; i < ln; i++)
 		iTotalRes += vMineResults[i].count;
 
 	double fGoodResPrc = 0.0;
@@ -1119,8 +1080,7 @@ void executor::http_result_report(std::string& out)
 	if(iPoolCallTimes.size() > 0)
 	{
 		using namespace std::chrono;
-		fAvgResTime = ((double)duration_cast<seconds>(system_clock::now() - tPoolConnTime).count())
-			/ iPoolCallTimes.size();
+		fAvgResTime = ((double)duration_cast<seconds>(system_clock::now() - tPoolConnTime).count()) / iPoolCallTimes.size();
 	}
 
 	snprintf(buffer, sizeof(buffer), sHtmlResultBodyHigh,
@@ -1132,7 +1092,7 @@ void executor::http_result_report(std::string& out)
 
 	out.append(buffer);
 
-	for(size_t i=1; i < vMineResults.size(); i++)
+	for(size_t i = 1; i < vMineResults.size(); i++)
 	{
 		snprintf(buffer, sizeof(buffer), sHtmlResultTableRow, vMineResults[i].msg.c_str(),
 			int_port(vMineResults[i].count), time_format(date, sizeof(date), vMineResults[i].time));
@@ -1149,24 +1109,22 @@ void executor::http_connection_report(std::string& out)
 
 	out.reserve(4096);
 
-	snprintf(buffer, sizeof(buffer), sHtmlCommonHeader, "Connection Report", ver_html,  "Connection Report");
+	snprintf(buffer, sizeof(buffer), sHtmlCommonHeader, "Connection Report", ver_html, "Connection Report");
 	out.append(buffer);
 
 	jpsock* pool = pick_pool_by_id(current_pool_id);
-	if(pool != nullptr && pool->is_dev_pool())
-		pool = pick_pool_by_id(last_usr_pool_id);
 
 	const char* cdate = "not connected";
-	if (pool != nullptr && pool->is_running() && pool->is_logged_in())
+	if(pool != nullptr && pool->is_running() && pool->is_logged_in())
 		cdate = time_format(date, sizeof(date), tPoolConnTime);
 
 	size_t n_calls = iPoolCallTimes.size();
 	unsigned int ping_time = 0;
-	if (n_calls > 1)
+	if(n_calls > 1)
 	{
 		//Not-really-but-good-enough median
-		std::nth_element(iPoolCallTimes.begin(), iPoolCallTimes.begin() + n_calls/2, iPoolCallTimes.end());
-		ping_time = iPoolCallTimes[n_calls/2];
+		std::nth_element(iPoolCallTimes.begin(), iPoolCallTimes.begin() + n_calls / 2, iPoolCallTimes.end());
+		ping_time = iPoolCallTimes[n_calls / 2];
 	}
 
 	snprintf(buffer, sizeof(buffer), sHtmlConnectionBodyHigh,
@@ -1175,8 +1133,7 @@ void executor::http_connection_report(std::string& out)
 		cdate, ping_time);
 	out.append(buffer);
 
-
-	for(size_t i=0; i < vSocketLog.size(); i++)
+	for(size_t i = 0; i < vSocketLog.size(); i++)
 	{
 		snprintf(buffer, sizeof(buffer), sHtmlConnectionTableRow,
 			time_format(date, sizeof(date), vSocketLog[i].time), vSocketLog[i].msg.c_str());
@@ -1205,12 +1162,13 @@ void executor::http_json_report(std::string& out)
 	std::string hr_thds, res_error, cn_error;
 
 	size_t nthd = pvThreads->size();
-	double fTotal[3] = { 0.0, 0.0, 0.0};
+	double fTotal[3] = {0.0, 0.0, 0.0};
 	hr_thds.reserve(nthd * 32);
 
-	for(size_t i=0; i < nthd; i++)
+	for(size_t i = 0; i < nthd; i++)
 	{
-		if(i != 0) hr_thds.append(1, ',');
+		if(i != 0)
+			hr_thds.append(1, ',');
 
 		double fHps[3];
 		fHps[0] = telem->calc_telemetry_data(10000, i);
@@ -1238,12 +1196,10 @@ void executor::http_json_report(std::string& out)
 	size_t iGoodRes = vMineResults[0].count, iTotalRes = iGoodRes;
 	size_t ln = vMineResults.size();
 
-	for(size_t i=1; i < ln; i++)
+	for(size_t i = 1; i < ln; i++)
 		iTotalRes += vMineResults[i].count;
 
 	jpsock* pool = pick_pool_by_id(current_pool_id);
-	if(pool != nullptr && pool->is_dev_pool())
-		pool = pick_pool_by_id(last_usr_pool_id);
 
 	size_t iConnSec = 0;
 	if(pool != nullptr && pool->is_running() && pool->is_logged_in())
@@ -1258,10 +1214,11 @@ void executor::http_json_report(std::string& out)
 
 	char buffer[2048];
 	res_error.reserve((vMineResults.size() - 1) * 128);
-	for(size_t i=1; i < vMineResults.size(); i++)
+	for(size_t i = 1; i < vMineResults.size(); i++)
 	{
 		using namespace std::chrono;
-		if(i != 1) res_error.append(1, ',');
+		if(i != 1)
+			res_error.append(1, ',');
 
 		snprintf(buffer, sizeof(buffer), sJsonApiResultError, int_port(vMineResults[i].count),
 			int_port(duration_cast<seconds>(vMineResults[i].time.time_since_epoch()).count()),
@@ -1271,18 +1228,19 @@ void executor::http_json_report(std::string& out)
 
 	size_t n_calls = iPoolCallTimes.size();
 	size_t iPoolPing = 0;
-	if (n_calls > 1)
+	if(n_calls > 1)
 	{
 		//Not-really-but-good-enough median
-		std::nth_element(iPoolCallTimes.begin(), iPoolCallTimes.begin() + n_calls/2, iPoolCallTimes.end());
-		iPoolPing = iPoolCallTimes[n_calls/2];
+		std::nth_element(iPoolCallTimes.begin(), iPoolCallTimes.begin() + n_calls / 2, iPoolCallTimes.end());
+		iPoolPing = iPoolCallTimes[n_calls / 2];
 	}
 
 	cn_error.reserve(vSocketLog.size() * 256);
-	for(size_t i=0; i < vSocketLog.size(); i++)
+	for(size_t i = 0; i < vSocketLog.size(); i++)
 	{
 		using namespace std::chrono;
-		if(i != 0) cn_error.append(1, ',');
+		if(i != 0)
+			cn_error.append(1, ',');
 
 		snprintf(buffer, sizeof(buffer), sJsonApiConnectionError,
 			int_port(duration_cast<seconds>(vSocketLog[i].time.time_since_epoch()).count()),
@@ -1291,7 +1249,7 @@ void executor::http_json_report(std::string& out)
 	}
 
 	size_t bb_size = 2048 + hr_thds.size() + res_error.size() + cn_error.size();
-	std::unique_ptr<char[]> bigbuf( new char[ bb_size ] );
+	std::unique_ptr<char[]> bigbuf(new char[bb_size]);
 
 	int bb_len = snprintf(bigbuf.get(), bb_size, sJsonApiFormat,
 		get_version_str().c_str(), hr_thds.c_str(), hr_buffer, a,
@@ -1338,8 +1296,7 @@ void executor::get_http_report(ex_event_name ev_id, std::string& data)
 	std::lock_guard<std::mutex> lck(httpMutex);
 
 	assert(pHttpString == nullptr);
-	assert(ev_id == EV_HTML_HASHRATE || ev_id == EV_HTML_RESULTS
-		|| ev_id == EV_HTML_CONNSTAT || ev_id == EV_HTML_JSON);
+	assert(ev_id == EV_HTML_HASHRATE || ev_id == EV_HTML_RESULTS || ev_id == EV_HTML_CONNSTAT || ev_id == EV_HTML_JSON);
 
 	pHttpString = &data;
 	httpReady = std::promise<void>();

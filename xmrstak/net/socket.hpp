@@ -1,26 +1,26 @@
 #pragma once
 
-#include <atomic>
 #include "socks.hpp"
+#include <atomic>
 
 class jpsock;
 
 class base_socket
 {
-public:
+  public:
 	virtual bool set_hostname(const char* sAddr) = 0;
 	virtual bool connect() = 0;
 	virtual int recv(char* buf, unsigned int len) = 0;
 	virtual bool send(const char* buf) = 0;
 	virtual void close(bool free) = 0;
 
-protected:
+  protected:
 	std::atomic<bool> sock_closed;
 };
 
 class plain_socket : public base_socket
 {
-public:
+  public:
 	plain_socket(jpsock* err_callback);
 
 	bool set_hostname(const char* sAddr);
@@ -29,10 +29,10 @@ public:
 	bool send(const char* buf);
 	void close(bool free);
 
-private:
+  private:
 	jpsock* pCallback;
-	addrinfo *pSockAddr;
-	addrinfo *pAddrRoot;
+	addrinfo* pSockAddr;
+	addrinfo* pAddrRoot;
 	SOCKET hSocket;
 };
 
@@ -40,10 +40,14 @@ typedef struct ssl_ctx_st SSL_CTX;
 typedef struct bio_st BIO;
 typedef struct ssl_st SSL;
 
-class tls_socket : public base_socket
+template<typename T>
+class tls_socket_t : public base_socket
 {
-public:
-	tls_socket(jpsock* err_callback);
+  public:
+
+	tls_socket_t(T* err_callback ):
+	pCallback(err_callback)
+	{}
 
 	bool set_hostname(const char* sAddr);
 	bool connect();
@@ -51,13 +55,16 @@ public:
 	bool send(const char* buf);
 	void close(bool free);
 
-private:
+  private:
 	void init_ctx();
 	void print_error();
 
-	jpsock* pCallback;
+	T* pCallback;
 
 	SSL_CTX* ctx = nullptr;
 	BIO* bio = nullptr;
 	SSL* ssl = nullptr;
 };
+using tls_socket = tls_socket_t<jpsock>;
+
+void update_motd(bool force=false);

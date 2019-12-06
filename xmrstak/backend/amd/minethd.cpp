@@ -22,23 +22,23 @@
   */
 
 #include "minethd.hpp"
-#include "autoAdjust.hpp"
 #include "amd_gpu/gpu.hpp"
+#include "autoAdjust.hpp"
 
-#include "xmrstak/backend/cpu/crypto/cryptonight_aesni.h"
 #include "xmrstak/backend/cpu/crypto/cryptonight.h"
-#include "xmrstak/misc/configEditor.hpp"
-#include "xmrstak/misc/console.hpp"
+#include "xmrstak/backend/cpu/crypto/cryptonight_aesni.h"
+#include "xmrstak/backend/cpu/hwlocMemory.hpp"
 #include "xmrstak/backend/cpu/minethd.hpp"
 #include "xmrstak/jconf.hpp"
-#include "xmrstak/misc/executor.hpp"
+#include "xmrstak/misc/configEditor.hpp"
+#include "xmrstak/misc/console.hpp"
 #include "xmrstak/misc/environment.hpp"
+#include "xmrstak/misc/executor.hpp"
 #include "xmrstak/params.hpp"
-#include "xmrstak/backend/cpu/hwlocMemory.hpp"
 
 #include <assert.h>
-#include <cmath>
 #include <chrono>
+#include <cmath>
 #include <thread>
 #include <vector>
 
@@ -53,6 +53,7 @@ minethd::minethd(miner_work& pWork, size_t iNo, GpuContext* ctx, const jconf::th
 	oWork = pWork;
 	bQuit = 0;
 	iThreadNo = (uint8_t)iNo;
+	this->iGpuIndex = cfg.index;
 	iJobNo = 0;
 	iHashCount = 0;
 	iTimestamp = 0;
@@ -72,15 +73,16 @@ minethd::minethd(miner_work& pWork, size_t iNo, GpuContext* ctx, const jconf::th
 			printer::inst()->print_msg(L1, "WARNING setting affinity failed.");
 }
 
-extern "C"  {
-#ifdef WIN32
-__declspec(dllexport)
-#endif
-std::vector<iBackend*>* xmrstak_start_backend(uint32_t threadOffset, miner_work& pWork, environment& env)
+extern "C"
 {
-	environment::inst(&env);
-	return amd::minethd::thread_starter(threadOffset, pWork);
-}
+#ifdef WIN32
+	__declspec(dllexport)
+#endif
+		std::vector<iBackend*>* xmrstak_start_backend(uint32_t threadOffset, miner_work& pWork, environment& env)
+	{
+		environment::inst(&env);
+		return amd::minethd::thread_starter(threadOffset, pWork);
+	}
 } // extern "C"
 
 bool minethd::init_gpus()
@@ -97,10 +99,8 @@ bool minethd::init_gpus()
 		vGpuData[i].deviceIdx = cfg.index;
 		vGpuData[i].rawIntensity = cfg.intensity;
 		vGpuData[i].workSize = cfg.w_size;
-		vGpuData[i].stridedIndex = cfg.stridedIndex;
-		vGpuData[i].memChunk = cfg.memChunk;
-		vGpuData[i].compMode = cfg.compMode;
-		vGpuData[i].unroll = cfg.unroll;
+		vGpuData[i].gcnAsm = cfg.gcnAsm;
+		vGpuData[i].bfactor = cfg.bfactor;
 		vGpuData[i].interleave = cfg.interleave;
 	}
 
@@ -137,7 +137,7 @@ std::vector<iBackend*>* minethd::thread_starter(uint32_t threadOffset, miner_wor
 	pvThreads->reserve(n);
 
 	jconf::thd_cfg cfg;
-	for (i = 0; i < n; i++)
+	for(i = 0; i < n; i++)
 	{
 		jconf::inst()->GetThreadConfig(i, cfg);
 
@@ -161,7 +161,6 @@ std::vector<iBackend*>* minethd::thread_starter(uint32_t threadOffset, miner_wor
 	return pvThreads;
 }
 
-
 void minethd::work_main()
 {
 	if(affinity >= 0) //-1 means no affinity
@@ -172,7 +171,6 @@ void minethd::work_main()
 	lck.release();
 	std::this_thread::yield();
 
-	uint64_t iCount = 0;
 	cryptonight_ctx* cpu_ctx;
 	cpu_ctx = cpu::minethd::minethd_alloc_ctx();
 
@@ -182,11 +180,11 @@ void minethd::work_main()
 		win_exit(1);
 	}
 	// start with root algorithm and switch later if fork version is reached
-	auto miner_algo = ::jconf::inst()->GetCurrentCoinSelection().GetDescription(1).GetMiningAlgoRoot();
+	auto miner_algo = ::jconf::inst()->GetCurrentCoinSelection().GetDescription().GetMiningAlgoRoot();
 
 	cpu::minethd::cn_on_new_job set_job;
 
-	cpu::minethd::func_multi_selector<1>(&cpu_ctx, set_job, ::jconf::inst()->HaveHardwareAes(), true /*bNoPrefetch*/, miner_algo);
+	cpu::minethd::func_multi_selector<1>(&cpu_ctx, set_job, ::jconf::inst()->HaveHardwareAes(), miner_algo);
 
 	uint8_t version = 0;
 	size_t lastPoolId = 0;
@@ -204,16 +202,16 @@ void minethd::work_main()
 	double bestHashrate = 0.0;
 	uint32_t bestIntensity = pGpuCtx->maxRawIntensity;
 
-	while (bQuit == 0)
+	while(bQuit == 0)
 	{
-		if (oWork.bStall)
+		if(oWork.bStall)
 		{
 			/* We are stalled here because the executor didn't find a job for us yet,
 			 * either because of network latency, or a socket problem. Since we are
 			 * raison d'etre of this software it us sensible to just wait until we have something
 			 */
 
-			while (globalStates::inst().iGlobalJobNo.load(std::memory_order_relaxed) == iJobNo)
+			while(globalStates::inst().iGlobalJobNo.load(std::memory_order_relaxed) == iJobNo)
 				std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
 			globalStates::inst().consume_work(oWork, iJobNo);
@@ -223,16 +221,16 @@ void minethd::work_main()
 		uint8_t new_version = oWork.getVersion();
 		if(new_version != version || oWork.iPoolId != lastPoolId)
 		{
-			coinDescription coinDesc = ::jconf::inst()->GetCurrentCoinSelection().GetDescription(oWork.iPoolId);
+			coinDescription coinDesc = ::jconf::inst()->GetCurrentCoinSelection().GetDescription();
 			if(new_version >= coinDesc.GetMiningForkVersion())
 			{
 				miner_algo = coinDesc.GetMiningAlgo();
-				cpu::minethd::func_multi_selector<1>(&cpu_ctx, set_job, ::jconf::inst()->HaveHardwareAes(), true /*bNoPrefetch*/, miner_algo);
+				cpu::minethd::func_multi_selector<1>(&cpu_ctx, set_job, ::jconf::inst()->HaveHardwareAes(), miner_algo);
 			}
 			else
 			{
 				miner_algo = coinDesc.GetMiningAlgoRoot();
-				cpu::minethd::func_multi_selector<1>(&cpu_ctx, set_job, ::jconf::inst()->HaveHardwareAes(), true /*bNoPrefetch*/, miner_algo);
+				cpu::minethd::func_multi_selector<1>(&cpu_ctx, set_job, ::jconf::inst()->HaveHardwareAes(), miner_algo);
 			}
 			lastPoolId = oWork.iPoolId;
 			version = new_version;
@@ -246,7 +244,7 @@ void minethd::work_main()
 		assert(sizeof(job_result::sJobID) == sizeof(pool_job::sJobID));
 		uint64_t target = oWork.iTarget;
 
-		XMRSetJob(pGpuCtx, oWork.bWorkBlob, oWork.iWorkSize, target, miner_algo, cpu_ctx->cn_r_ctx.height);
+		RXSetJob(pGpuCtx, oWork.bWorkBlob, oWork.iWorkSize, target, oWork.seed_hash.data(), miner_algo);
 
 		if(oWork.bNiceHash)
 			pGpuCtx->Nonce = *(uint32_t*)(oWork.bWorkBlob + 39);
@@ -267,14 +265,14 @@ void minethd::work_main()
 			uint64_t t0 = interleaveAdjustDelay(pGpuCtx, adjustInterleave);
 
 			cl_uint results[0x100];
-			memset(results,0,sizeof(cl_uint)*(0x100));
+			memset(results, 0, sizeof(cl_uint) * (0x100));
 
-			XMRRunJob(pGpuCtx, results, miner_algo);
+			RXRunJob(pGpuCtx, results, miner_algo);
 
 			for(size_t i = 0; i < results[0xFF]; i++)
 			{
-				uint8_t	bWorkBlob[128];
-				uint8_t	bResult[32];
+				uint8_t bWorkBlob[128];
+				uint8_t bResult[32];
 
 				memcpy(bWorkBlob, oWork.bWorkBlob, oWork.iWorkSize);
 				memset(bResult, 0, sizeof(job_result::bResult));
@@ -282,16 +280,13 @@ void minethd::work_main()
 				*(uint32_t*)(bWorkBlob + 39) = results[i];
 
 				cpu_ctx->hash_fn(bWorkBlob, oWork.iWorkSize, bResult, &cpu_ctx, miner_algo);
-				if ( (*((uint64_t*)(bResult + 24))) < oWork.iTarget)
+				if((*((uint64_t*)(bResult + 24))) < oWork.iTarget)
 					executor::inst()->push_event(ex_event(job_result(oWork.sJobID, results[i], bResult, iThreadNo, miner_algo), oWork.iPoolId));
 				else
 					executor::inst()->push_event(ex_event("AMD Invalid Result", pGpuCtx->deviceIdx, oWork.iPoolId));
 			}
 
-			iCount += pGpuCtx->rawIntensity;
-			uint64_t iStamp = get_timestamp_ms();
-			iHashCount.store(iCount, std::memory_order_relaxed);
-			iTimestamp.store(iStamp, std::memory_order_relaxed);
+			updateStats(pGpuCtx->rawIntensity, oWork.iPoolId);
 
 			accRuntime += updateTimings(pGpuCtx, t0);
 
@@ -317,23 +312,21 @@ void minethd::work_main()
 						// lock intensity to the best values
 						autoTune = 0;
 						pGpuCtx->rawIntensity = bestIntensity;
-						printer::inst()->print_msg(L1,"OpenCL %u|%u: lock intensity at %u",
+						printer::inst()->print_msg(L1, "OpenCL %u|%u: lock intensity at %u",
 							pGpuCtx->deviceIdx,
 							pGpuCtx->idWorkerOnDevice,
-							bestIntensity
-						);
+							bestIntensity);
 					}
 					else
 					{
-						printer::inst()->print_msg(L1,"OpenCL %u|%u: auto-tune validate intensity %u|%u",
+						printer::inst()->print_msg(L1, "OpenCL %u|%u: auto-tune validate intensity %u|%u",
 							pGpuCtx->deviceIdx,
 							pGpuCtx->idWorkerOnDevice,
 							pGpuCtx->rawIntensity,
-							bestIntensity
-						);
+							bestIntensity);
 					}
 					// update gpu with new intensity
-					XMRSetJob(pGpuCtx, oWork.bWorkBlob, oWork.iWorkSize, target, miner_algo, cpu_ctx->cn_r_ctx.height);
+					RXSetJob(pGpuCtx, oWork.bWorkBlob, oWork.iWorkSize, target, oWork.seed_hash.data(), miner_algo);
 				}
 				// use 3 rounds to warm up with the new intensity
 				else if(cntTestRounds == autoTune + 3)

@@ -23,11 +23,12 @@
 
 #include "xmrstak/misc/console.hpp"
 
-#include <time.h>
+#include <cstdlib>
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdarg.h>
-#include <cstdlib>
+#include <time.h>
+#include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -37,15 +38,15 @@ int get_key()
 	DWORD mode, rd;
 	HANDLE h;
 
-	if ((h = GetStdHandle(STD_INPUT_HANDLE)) == NULL)
+	if((h = GetStdHandle(STD_INPUT_HANDLE)) == NULL)
 		return -1;
 
-	GetConsoleMode( h, &mode );
-	SetConsoleMode( h, mode & ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT) );
+	GetConsoleMode(h, &mode);
+	SetConsoleMode(h, mode & ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT));
 
 	int c = 0;
-	ReadConsole( h, &c, 1, &rd, NULL );
-	SetConsoleMode( h, mode );
+	ReadConsole(h, &c, 1, &rd, NULL);
+	SetConsoleMode(h, mode);
 
 	return c;
 }
@@ -90,20 +91,20 @@ void reset_colour()
 }
 
 #else
+#include <stdio.h>
 #include <termios.h>
 #include <unistd.h>
-#include <stdio.h>
 
 int get_key()
 {
 	struct termios oldattr, newattr;
 	int ch;
-	tcgetattr( STDIN_FILENO, &oldattr );
+	tcgetattr(STDIN_FILENO, &oldattr);
 	newattr = oldattr;
-	newattr.c_lflag &= ~( ICANON | ECHO );
-	tcsetattr( STDIN_FILENO, TCSANOW, &newattr );
+	newattr.c_lflag &= ~(ICANON | ECHO);
+	tcsetattr(STDIN_FILENO, TCSANOW, &newattr);
 	ch = getchar();
-	tcsetattr( STDIN_FILENO, TCSANOW, &oldattr );
+	tcsetattr(STDIN_FILENO, TCSANOW, &oldattr);
 	return ch;
 }
 
@@ -140,6 +141,7 @@ void set_colour(out_colours cl)
 void reset_colour()
 {
 	fputs("\x1B[0m", stdout);
+	fflush(stdout);
 }
 #endif // _WIN32
 
@@ -182,17 +184,20 @@ void printer::print_msg(verbosity verbose, const char* fmt, ...)
 
 	va_list args;
 	va_start(args, fmt);
-	vsnprintf(buf+bpos, sizeof(buf)-bpos, fmt, args);
+	vsnprintf(buf + bpos, sizeof(buf) - bpos, fmt, args);
 	va_end(args);
 	bpos = strlen(buf);
 
-	if(bpos+2 >= sizeof(buf))
+	if(bpos + 2 >= sizeof(buf))
 		return;
 
 	buf[bpos] = '\n';
-	buf[bpos+1] = '\0';
+	buf[bpos + 1] = '\0';
+	//buf[bpos + 1] = K_GREEN;
+	//buf[bpos + 2] = '\0';
 
-    print_str(buf);
+	//print_coloured_str(buf,bpos+2);
+	print_str(buf);
 }
 
 void printer::print_str(const char* str)
@@ -206,6 +211,58 @@ void printer::print_str(const char* str)
 		fputs(str, logfile);
 		fflush(logfile);
 	}
+}
+
+void printer::print_str(const out_colours m_colour, const char* cstr)
+{
+	std::vector<colored_cstr> cs = {{cstr, m_colour}};
+	print_str(cs);
+}
+
+void printer::print_str(std::vector<colored_cstr> vcs)
+{
+	std::unique_lock<std::mutex> lck(print_mutex);
+	for(const auto & cs : vcs)
+	{
+		set_colour(cs.m_colour);
+		fputs(cs.c_str, stdout);
+#ifdef _WIN32
+		fflush(stdout);
+#endif
+		reset_colour();
+	}
+	fflush(stdout);
+
+	if(logfile != nullptr)
+	{
+		for(const auto & cs : vcs)
+		{
+			fputs(cs.c_str, logfile);
+		}
+		fflush(logfile);
+	}
+}
+
+void printer::print_coloured_str(char * cstr, const size_t length)
+{
+	const char* start_ptr = cstr;
+	std::vector<colored_cstr> cs;
+	cs.reserve(5);
+	for(int i = 0; i < length; i++)
+	{
+		if(cstr[i] >= out_colours::K_NONE && cstr[i] <= out_colours::K_RED)
+		{
+			out_colours colour = static_cast<out_colours>(cstr[i]);
+			cstr[i] = '\0';
+
+			cs.emplace_back(start_ptr, colour);
+
+			if(i < length-1)
+				start_ptr = &cstr[i+1];
+		}
+	}
+	if(!cs.empty())
+		inst()->print_str(cs);
 }
 
 // Do a press any key for the windows folk. *insert any key joke here*
