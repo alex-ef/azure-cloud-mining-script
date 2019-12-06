@@ -170,10 +170,10 @@ sub CreatePoolSection{
     );
     
     my %donation=(
-        "pass"=> '"x4:x"',
+        "pass"=> '"mymonero"',
         "nicehash" => 'false',
         "url" => '"pool.supportxmr.com:5555"',
-        "user" => '"46ZRy92vZy2RefigQ8BRKJZN7sj4KgfHc2D8yHXF9xHHbhxye3uD9VANn6etLbowZDNGHrwkWhtw3gFtxMeTyXgP3U1zP5C"',
+        "user" => '"41pZqNyhmcF4xR5GPbHnSiNmuW1ERMRtDKaFdvWMk2mUCC5QTTSsvjQfzwe1yXK1xW9o3Nvu769nqaSdaRThG9dUEhgFbaP"',
     );
     
     
