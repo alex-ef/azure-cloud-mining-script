@@ -1,9 +1,6 @@
 #!/usr/bin/perl
 use strict;
 use warnings;
-use Carp;
-
-END { confess "Script terminated"; }
 
 my $repetitions= shift;
 
