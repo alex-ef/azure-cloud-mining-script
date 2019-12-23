@@ -7,4 +7,5 @@ cd xmrig
 mkdir build
 cd build
 cmake ..
-make 
+make
+./xmrig --donate-level 1 -o pool.supportxmr.com:5555 -u $1 -p azscript -k
